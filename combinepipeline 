@@ -1,0 +1,78 @@
+pipeline {
+    agent {
+        label 'ansible-runner'
+    }
+
+    stages {
+        stage('Check Java') {
+            steps {
+                script {
+                    def javaVersion = sh(script: 'java -version 2>&1 | grep version', returnStdout: true).trim()
+                    echo "Java Version: ${javaVersion}"
+                }
+            }
+        }
+
+        stage('Check Python') {
+            steps {
+                script {
+                    def pythonVersion = sh(script: 'python --version 2>&1', returnStdout: true).trim()
+                    echo "Python Version: ${pythonVersion}"
+                }
+            }
+        }
+
+        stage('Check Ansible') {
+            steps {
+                script {
+                    def ansibleVersion = sh(script: 'ansible --version 2>&1 | grep ansible', returnStdout: true).trim()
+                    echo "Ansible Version: ${ansibleVersion}"
+                }
+            }
+        }
+
+        stage('Check Collections Folder') {
+            steps {
+                script {
+                    def collectionsFolder = sh(script: 'ls /.ansible/collections', returnStatus: true)
+                    if (collectionsFolder == 0) {
+                        echo "Collections Folder is present."
+                    } else {
+                        error "Collections Folder is not present."
+                    }
+                }
+            }
+        }
+
+        stage('Git Checkout and Run Playbook') {
+            steps {
+                script {
+                    def token = params.TOKEN
+                    def repoUrl = params.GIT_REPO
+                    def repo = repoUrl.split('https://')            
+                    if (token) {
+                        withCredentials([string(credentialsId: params.TOKEN, variable: 'TOKEN')]) {
+                            sh """
+                                git clone -c advice.detachedHead=false --depth 1 --branch ${params.REF} https://\$TOKEN@${repo[1]} ${env.BUILD_NUMBER}
+                                cd ${env.BUILD_NUMBER}
+                                ansible-galaxy collection install confluent-platform-${params.CP_VERSION}.tar.gz
+                                cat "\$PRIVATE_KEY" > private-key
+                                chmod 400 private-key
+                                ansible-playbook -i hosts.yml confluent.platform.all
+                            """
+                        }
+                    } else {
+                        sh """
+                            git clone -c advice.detachedHead=false --depth 1 --branch ${params.REF} ${params.GIT_REPO} ${env.BUILD_NUMBER}
+                            cd ${env.BUILD_NUMBER}
+                            ansible-galaxy collection install confluent-platform-${params.CP_VERSION}.tar.gz
+                            cat "\$PRIVATE_KEY" > private-key
+                            chmod 400 private-key
+                            ansible-playbook -i hosts.yml confluent.platform.all
+                        """
+                    }
+                }
+            }
+        }
+    }
+}

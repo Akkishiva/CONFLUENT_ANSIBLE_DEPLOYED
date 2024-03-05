@@ -1,0 +1,45 @@
+
+
+
+stage('Run playbook') {
+    steps {
+        script {
+            def ansibleArgs = ''
+            if (params.ANSIBLE_TAGS) {
+                ansibleArgs = ansibleArgs.concat(" --tags " + params.ANSIBLE_TAGS)
+            }
+            if (params.ANSIBLE_SKIP_TAGS) {
+                ansibleArgs = ansibleArgs.concat(" --skip-tags " + params.ANSIBLE_SKIP_TAGS)
+            }
+            if (params.ANSIBLE_LIMIT) {
+                ansibleArgs = ansibleArgs.concat(" --limit " + params.ANSIBLE_LIMIT)
+            }
+
+            if (params.AIR_GAPPED) {
+                // Execute without internet
+                withCredentials([file(credentialsId: params.PRIVATE_KEY, variable: 'PRIVATE_KEY')]) {
+                    dir("${env.BUILD_NUMBER}") {
+                        sh """
+                            cd ${params.ARTEFACTS_DIR}
+                            cat "\$PRIVATE_KEY" > private-key
+                            chmod 400 private-key
+                            ansible-playbook -i hosts.yml confluent.platform.all ${ansibleArgs}
+                        """
+                    }
+                }
+            } else {
+                // Execute with internet
+                withCredentials([file(credentialsId: params.PRIVATE_KEY, variable: 'PRIVATE_KEY')]) {
+                    dir("${env.BUILD_NUMBER}") {
+                        sh """
+                            cd ${params.ARTEFACTS_DIR}
+                            cat "\$PRIVATE_KEY" > private-key
+                            chmod 400 private-key
+                            ansible-playbook -i inhosts.yml confluent.platform.all ${ansibleArgs}
+                        """
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,164 @@
+pipeline {
+    agent {
+        label 'ansible-runner'
+    }
+
+    parameters {
+        string(name: 'GIT_REPO', description: 'URL of the Git repository', defaultValue: '')
+        credentials(name: 'TOKEN', description: 'Private access token for the Git repository', defaultValue: '', required: false)
+        string(name: 'REF', description: 'Branch or tag.', trim: true, defaultValue: '1.0.2')
+        string(name: 'ARTEFACTS_DIR', description: 'Relative path where the playbook hosts and config are present.', trim: true, defaultValue: '.')
+        string(name: 'CP_VERSION', description: 'CP version to install.', trim: true, defaultValue: '7.4.1')
+        string(name: 'COLLECTIONS_DIR', description: 'Relative path where the tar files are present', trim: true, defaultValue: '/root/.ansible/collections/ansible_collections')
+        credentials(name: 'PRIVATE_KEY', description: 'SSH private key for accessing the remote machines.', defaultValue: '', required: true)
+        string(name: 'ANSIBLE_TAGS', description: 'Values to pass to the --tags parameter', trim: true, defaultValue: '')
+        string(name: 'ANSIBLE_SKIP_TAGS', description: 'Values to pass to the --skip-tags parameter', trim: true, defaultValue: '')
+        string(name: 'ANSIBLE_LIMIT', description: 'Values to pass to the --limit parameter', trim: true, defaultValue: '')
+    }
+
+    
+        
+
+
+    stages {
+        stage('Pre-Upgrade') {
+            steps {
+                script {
+                    // Your pre-upgrade steps here
+                    sh '''
+                        #!/bin/bash
+                        hash=$(kafka-topics --bootstrap-server 54.237.75.150:9092 --list | sha256sum)
+                        hash=$(echo "$hash" | cut -d' ' -f1)
+                        echo "$hash" > pre_upgrade_topics_hash.txt
+                        echo "Hash saved to pre_upgrade_topics_hash.txt"
+                    '''
+                }
+            }
+        }
+        
+        stage('Check Java') {
+            steps {
+                script {
+                    def javaVersion = sh(script: 'java -version 2>&1 | grep version', returnStdout: true).trim()
+                    echo "Java Version: ${javaVersion}"
+                }
+            }
+        }
+
+        stage('Check Python') {
+            steps {
+                script {
+                    def pythonVersion = sh(script: 'python --version 2>&1', returnStdout: true).trim()
+                    echo "Python Version: ${pythonVersion}"
+                }
+            }
+        }
+
+        stage('Check Ansible') {
+            steps {
+                script {
+                    def ansibleVersion = sh(script: 'ansible --version 2>&1 | grep ansible', returnStdout: true).trim()
+                    echo "Ansible Version: ${ansibleVersion}"
+                }
+            }
+        }
+
+        stage('Check Collections Folder') {
+            steps {
+                script {
+                    def collectionsFolder = sh(script: "ls ${params.COLLECTIONS_DIR}", returnStatus: true)
+                    if (collectionsFolder == 0) {
+                        echo "Collections Folder is present."
+                    } else {
+                        error "Collections Folder is not present."
+                        }
+                }
+            }
+        }
+
+        stage('Git Checkout') {
+            steps {
+                script {
+                    def token = params.TOKEN
+                    def repoUrl = params.GIT_REPO
+                    def repo = repoUrl.split('https://')
+                    if (token) {
+                        withCredentials([string(credentialsId: params.TOKEN, variable: 'TOKEN')]) {
+                            sh """
+                                git clone -c advice.detachedHead=false --depth 1 --branch ${params.REF} https://\$TOKEN@${repo[1]} ${env.BUILD_NUMBER}
+                            """
+                        }
+                    } else {
+                        sh """
+                            git clone -c advice.detachedHead=false --depth 1 --branch ${params.REF} ${params.GIT_REPO} ${env.BUILD_NUMBER}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Download collection') {
+            steps {
+                script {
+                    dir("${env.BUILD_NUMBER}") {
+                        sh """
+                            cd ${params.ARTEFACTS_DIR}
+                            ansible-galaxy collection install confluent.platform:${params.CP_VERSION} -p collections
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Run playbook') {
+            steps {
+                script {
+                    def ansibleArgs = ''
+                    if (params.ANSIBLE_TAGS) {
+                        ansibleArgs = ansibleArgs.concat(" --tags " + params.ANSIBLE_TAGS)
+                    }
+                    if (params.ANSIBLE_SKIP_TAGS) {
+                        ansibleArgs = ansibleArgs.concat(" --skip-tags " + params.ANSIBLE_SKIP_TAGS)
+                    }
+                    if (params.ANSIBLE_LIMIT) {
+                        ansibleArgs = ansibleArgs.concat(" --limit " + params.ANSIBLE_LIMIT)
+                    }
+                    withCredentials([file(credentialsId: params.PRIVATE_KEY, variable: 'PRIVATE_KEY')]) {
+                        dir("${env.BUILD_NUMBER}") {
+                            sh """
+                                cd ${params.ARTEFACTS_DIR}
+                                cat "\$PRIVATE_KEY" > private-key
+                                chmod 400 private-key
+                                ansible-playbook -i hosts.yml confluent.platform.all ${ansibleArgs}
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Post-Upgrade') {
+            steps {
+                script {
+                    // Your post-upgrade steps here
+                    sh '''
+                        #!/bin/bash
+                        hash=$(kafka-topics --bootstrap-server 54.237.75.150:9092 --list | sha256sum)
+                        hash=$(echo "$hash" | cut -d' ' -f1)
+                        echo "$hash" > post_upgrade_topics_hash.txt
+                        echo "Hash saved to post_upgrade_topics_hash.txt"
+
+                        text_hash=$(cat pre_upgrade_topics_hash.txt)
+
+                        if [ "$hash" = "$text_hash" ]; then
+                            echo "Hashes match. All topics are present."
+                        else
+                            echo "Hashes do not match."
+                        fi
+                    '''
+                }
+            }
+        }
+    
+    }
+}

@@ -1,0 +1,155 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'PRE_CHECK', description: 'Python_artifact', defaultValue: 'precheck.py')
+        string(name: 'GIT_REPO', description: 'URL of the Git repository', defaultValue: '')
+        credentials(name: 'TOKEN', description: 'Private access token for the Git repository', defaultValue: '', required: false)
+        string(name: 'REF', description: 'Branch or tag.', trim: true, defaultValue: '1.0.2')
+        string(name: 'ARTEFACTS_DIR', description: 'Relative path where the playbook hosts and config are present.', trim: true, defaultValue: '.')
+        string(name: 'COLLECTIONS_DIR', description: 'Relative path where the tar files are present', trim: true, defaultValue: '/home/centos/.ansible/collections/ansible_collections')
+        string(name: 'CP_VERSION', description: 'CP version to install.', trim: true, defaultValue: '7.4.1')
+        credentials(name: 'PRIVATE_KEY', description: 'SSH private key for accessing the remote machines.', defaultValue: '', required: true)
+        string(name: 'ANSIBLE_TAGS', description: 'Values to pass to the --tags parameter', trim: true, defaultValue: '')
+        string(name: 'ANSIBLE_SKIP_TAGS', description: 'Values to pass to the --skip-tags parameter', trim: true, defaultValue: '')
+        string(name: 'ANSIBLE_LIMIT', description: 'Values to pass to the --limit parameter', trim: true, defaultValue: '')
+        booleanParam(name: 'UP_GRADE_DOWN_GRADE', description: 'Upgrade and downgrade', defaultValue: false)
+        booleanParam(name: 'AIR_GAPPED', description: 'Specify if the environment is air-gapped', defaultValue: false)
+    }
+
+    stages {
+        stage('Check Java') {
+            steps {
+                script {
+                    def javaVersion = sh(script: 'java -version 2>&1 | grep version', returnStdout: true).trim()
+                    echo "Java Version: ${javaVersion}"
+                }
+            }
+        }
+
+        stage('Check Python') {
+            steps {
+                script {
+                    def pythonVersion = sh(script: 'python3 --version 2>&1', returnStdout: true).trim()
+                    echo "Python Version: ${pythonVersion}"
+                }
+            }
+        }
+
+        stage('Check Ansible') {
+            steps {
+                script {
+                    def ansibleVersion = sh(script: 'ansible --version 2>&1 | grep ansible', returnStdout: true).trim()
+                    echo "Ansible Version: ${ansibleVersion}"
+                }
+            }
+        }
+
+        stage('Check Collections Folder') {
+            steps {
+                script {
+                    def collectionsFolder = sh(script: "ls ${params.COLLECTIONS_DIR}", returnStatus: true)
+                    if (collectionsFolder == 0) {
+                        echo "Collections Folder is present."
+                    } else {
+                        error "Collections Folder is not present."
+                    }
+                }
+            }
+        }
+
+        stage('Git Checkout') {
+            steps {
+                script {
+                    def token = params.TOKEN
+                    def repoUrl = params.GIT_REPO
+                    def repo = repoUrl.split('https://')
+                    if (token) {
+                        withCredentials([string(credentialsId: params.TOKEN, variable: 'TOKEN')]) {
+                            sh """
+                                git clone -c advice.detachedHead=false --depth 1 --branch ${params.REF} https://\$TOKEN@${repo[1]} ${env.BUILD_NUMBER}
+                            """
+                        }
+                    } else {
+                        sh """
+                            git clone -c advice.detachedHead=false --depth 1 --branch ${params.REF} ${params.GIT_REPO} ${env.BUILD_NUMBER}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Download collection') {
+            steps {
+                dir("${env.BUILD_NUMBER}") {
+                    script {
+                        if (params.AIR_GAPPED) {
+                            echo "location of collections in air-gapped mode"
+                            sh """
+                                echo ${params.COLLECTIONS_DIR}
+                            """
+                        } else {
+                            echo "Downloading collection with internet"
+                            sh """
+                                ansible-galaxy collection install confluent.platform
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Precheck') {
+            when {
+                expression { params.UP_GRADE_DOWN_GRADE == true }
+            }
+            steps {
+                dir("${env.BUILD_NUMBER}") {
+                    sh """
+                        cd ${params.ARTEFACTS_DIR}
+                        python3 ${params.PRE_CHECK}
+                    """
+                }
+            }
+        }
+
+        stage('Run playbook') {
+            steps {
+                script {
+                    def ansibleArgs = ''
+                    if (params.ANSIBLE_TAGS) {
+                        ansibleArgs = ansibleArgs.concat(" --tags " + params.ANSIBLE_TAGS)
+                    }
+                    if (params.ANSIBLE_SKIP_TAGS) {
+                        ansibleArgs = ansibleArgs.concat(" --skip-tags " + params.ANSIBLE_SKIP_TAGS)
+                    }
+                    if (params.ANSIBLE_LIMIT) {
+                        ansibleArgs = ansibleArgs.concat(" --limit " + params.ANSIBLE_LIMIT)
+                    }
+                    withCredentials([file(credentialsId: params.PRIVATE_KEY, variable: 'PRIVATE_KEY')]) {
+                        dir("${env.BUILD_NUMBER}") {
+                            sh """
+                                cd ${params.ARTEFACTS_DIR}
+                                cat "\$PRIVATE_KEY" > private-key
+                                chmod 400 private-key
+                                ansible-playbook -i hosts.yml confluent.platform.all ${ansibleArgs}
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Postcheck') {
+            steps {
+                dir("${env.BUILD_NUMBER}") {
+                    sh """
+                        cd ${params.ARTEFACTS_DIR}
+                        python3 ${params.PRE_CHECK}
+                    """
+                }
+            }
+        }
+    }
+}
+

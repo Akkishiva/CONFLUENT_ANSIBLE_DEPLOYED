@@ -1,0 +1,21 @@
+all:
+  vars:
+    ansible_connection: ssh
+    ansible_user: root
+    ansible_become: true
+    ansible_ssh_private_key_file: /home/jenkins/one
+
+zookeeper:
+  vars:
+    validate_hosts: false
+  hosts: 165.22.212.93
+
+kafka_broker:
+  vars:
+    validate_hosts: false
+  hosts: 165.22.212.93
+
+control_center:
+  vars:
+    validate_hosts: false
+  hosts: 165.22.212.93
